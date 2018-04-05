@@ -77,7 +77,7 @@ $(document).ready(function() {
       $('#delete-confirmed-button').bind('click', function(event) {
         event.preventDefault();
         $('#deleteConfirmModal').modal('toggle');
-        $.postJSON('/delete?path=' + encodeURIComponent(open_path), function(resp) {
+        $.post('/delete?path=' + encodeURIComponent(open_path), function(resp) {
           // console.log(resp);
           if (resp && resp.error) {
             console.log(resp.error);

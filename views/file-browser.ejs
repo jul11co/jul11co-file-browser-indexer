@@ -145,18 +145,19 @@
             </ul>
           </div>
           <h5>
-            <%if (dirs.length>1){%><span><%=dirs.length%> folders</span><%}else if (dirs.length==1){%><span><%=dirs.length%> folder</span><%}%><%if (dirs.length>0&&files_length>0){%><span>, </span><%}%><%if (files_length>1){%><span><%=files_length%> files</span><%}else if (files_length==1){%><span>1 file</span><%}%>
-            <%if (total_size>0){%> - <%=bytes(total_size)%><%}%> <span><%if (query.dir) {%><a href="/?files=1&from_dir=<%=encodeURIComponent(query.dir)%>">Show files</a><%}%></span>
+            <%if (dirs_length>1){%><span><%=dirs_length%> folders</span><%}else if (dirs_length==1){%><span><%=dirs_length%> folder</span><%}%><%if (dirs_length>0&&files_length>0){%><span>, </span><%}%><%if (files_length>1){%><span><%=files_length%> files</span><%}else if (files_length==1){%><span>1 file</span><%}%>
+            <%if (total_size>0){%> - <%=bytes(total_size)%><%}%> <span><%if (query.dir) {%> - <a href="/?files=1&from_dir=<%=encodeURIComponent(query.dir)%>">Show files</a><%}%></span>
           </h5>
         </div>
 
         <%var query_skip = (query.skip ? parseInt(query.skip) : 0);%>
-        <%var next_skip = query_skip+1000;%>
+        <%var query_limit = query.limit || 100;%>
+        <%var next_skip = query_skip+query_limit;%>
 
-        <%if (files_length>next_skip){%>
-        <p><%=(query_skip+1)%>-<%=(next_skip)%>, <a href="/?<%=base_comp%>&skip=<%=next_skip%>">and more <%=(files_length-next_skip)%> files...</a></p>
+        <%if (items_length>next_skip){%>
+        <p><%=(query_skip+1)%>-<%=(next_skip)%>, <a href="/?<%=base_comp%>&skip=<%=next_skip%>">and more <%=(items_length-next_skip)%> items...</a></p>
         <%}else if (query_skip>0){%>
-        <p><%=(query_skip+1)%>-<%=files_length%></p>
+        <p><%=(query_skip+1)%>-<%=items_length%></p>
         <%}%>
 
         <div style="overflow-x:auto;">
@@ -297,8 +298,8 @@
         </table>
         </div>
 
-        <%if (files_length>next_skip){%>
-        <p><a href="/?<%=base_comp%>&skip=<%=next_skip%>">and more <%=(files_length-next_skip)%> files...</a></p>
+        <%if (items_length>next_skip){%>
+        <p><a href="/?<%=base_comp%>&skip=<%=next_skip%>">and more <%=(items_length-next_skip)%> items...</a></p>
         <%}%>
 
       </div>

@@ -444,13 +444,30 @@ var startServer = function() {
       }
     }
 
-    query.limit = query.limit ? parseInt(query.limit) : 1000;
+    query.limit = query.limit ? parseInt(query.limit) : 100;
     query.skip = query.skip ? parseInt(query.skip) : 0;
     
-    var start_index = Math.min(query.skip, files.length);
-    var end_index = Math.min(query.skip + query.limit, files.length);
+    // var start_index = Math.min(query.skip, files.length);
+    // var end_index = Math.min(query.skip + query.limit, files.length);
+    // var files_length = files.length;
+    // files = files.slice(start_index, end_index);
+
+    var dirs_length = dirs.length;
     var files_length = files.length;
-    files = files.slice(start_index, end_index);
+    var items_length = dirs_length + files_length;
+    var start_index = Math.min(query.skip, items_length);
+    var end_index = Math.min(query.skip + query.limit, items_length);
+
+    if (start_index < dirs.length && end_index < dirs.length) {
+      dirs = dirs.slice(start_index, end_index);
+      files = [];
+    } else if (start_index < dirs.length && end_index >= dirs.length) {
+      dirs = dirs.slice(start_index); // till end
+      files = files.slice(0, end_index-dirs.length);
+    } else { // start_index > dirs.length
+      dirs = [];
+      files = files.slice(start_index-dirs.length, end_index-dirs.length);
+    }
 
     if (options.check_exists) {
       var exists_map = {};
@@ -470,7 +487,9 @@ var startServer = function() {
       dir_name: path.basename(dir_path),
       dir_file_types: dir_file_types,
       total_size: total_size,
+      items_length: items_length,
       dirs: dirs,
+      dirs_length: dirs_length,
       files: files,
       files_length: files_length,
       files_count: all_files.length,
