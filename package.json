@@ -1,13 +1,16 @@
 {
   "name": "jul11co-file-browser-indexer",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Jul11Co File Browser & Indexer",
   "author": "Jul11Co<jul.eleven.co@gmail.com>",
   "repository": "https://github.com/jul11co/jul11co-file-browser-indexer",
   "keywords": [
     "jul11co",
     "nodejs",
-    "cli"
+    "cli",
+    "file-browser",
+    "file-indexer",
+    "web-ui"
   ],
   "bin": {
     "file-browser": "./file-browser.js",
@@ -17,7 +20,6 @@
     "async": "^1.5.2",
     "bytes": "^2.5.0",
     "chalk": "^1.1.3",
-    "easyimage": "^2.1.0",
     "ejs": "^2.5.7",
     "express": "^4.16.2",
     "express-session": "^1.15.6",
@@ -32,9 +34,7 @@
     "natsort": "^1.0.6",
     "open": "0.0.5",
     "pdf-image": "^1.1.0",
-    "read-chunk": "^2.1.0",
     "sharp": "^0.18.4",
-    "shell-quote": "^1.6.1",
     "single-line-log": "^1.1.2",
     "unpack-all": "0.0.4"
   },

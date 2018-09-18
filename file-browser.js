@@ -19,6 +19,12 @@ var utils = require('jul11co-utils');
 
 var comicFile = require('./lib/comic-file');
 var photoFile = require('./lib/photo-file');
+var pdfFile = require('./lib/pdf-file');
+
+var FileStore = require('./lib/file-store');
+var fileUtils = require('./lib/file-utils');
+
+var package = require('./package.json');
 
 function printUsage() {
   console.log('Usage: file-browser <data-dir> [OPTIONS]');
@@ -26,8 +32,11 @@ function printUsage() {
   console.log('');
   console.log('OPTIONS:');
   console.log('     --verbose                   : verbose');
-  console.log('     --check-exists              : check for file/folder existences');
-  console.log('     --no-thumbs                 : do not generate thumbnals');
+  // console.log('     --check-exists              : check for file/folder existences');
+  console.log('');
+  console.log('     --no-thumbs                 : do not generate thumbnails');
+  console.log('     --pdf-thumbs                : generate thumbnails for PDF files');
+  console.log('     --zip-thumbs                : generate thumbnails for ZIP files');
   console.log('');
 }
 
@@ -78,24 +87,21 @@ data_dir = path.resolve(data_dir);
 console.log('Input directory:', data_dir);
 
 var config = {
-  thumbnals: !(options.no_thumbs)
+  thumbnails: !(options.no_thumbs),
+  pdf_thumbs: options.pdf_thumbs,
+  zip_thumbs: options.zip_thumbs
 };
 
-var all_dirs = [];
+var comic_extract_queue = new JobQueue();
+var pdf_thumbnail_queue = new JobQueue();
 
-var dirs_map = {};
-var files_map = {};
+var filestore = new FileStore();
 
 var IMAGE_FILE_TYPES = ['jpg','jpeg','png','gif'];
 var VIDEO_FILE_TYPES = ['mp4','webm'];
 var COMIC_FILE_TYPES = ['cbz','cbr','zip'];
-
-var file_types_map = {};
-var popular_file_types = [];
-
-var image_files = [];
-var video_files = [];
-var all_files = [];
+var ARCHIVE_FILE_TYPES = ['zip','rar','7z'];
+var PDF_FILE_TYPES = ['pdf'];
 
 if (options.listen_port) {
   options.listen_port = parseInt(options.listen_port);
@@ -107,113 +113,24 @@ if (options.listen_port) {
 
 var cache_dir = path.join(process.env['HOME'], '.jul11co', 'file-browser', 'cache');
 fse.ensureDirSync(cache_dir);
+
 var thumbs_dir = path.join(process.env['HOME'], '.jul11co', 'file-browser', 'thumbs');
 fse.ensureDirSync(thumbs_dir);
 
 var listen_port = options.listen_port || 31118;
 
-function ellipsisMiddle(str, max_length, first_part, last_part) {
-  if (!max_length) max_length = 140;
-  if (!first_part) first_part = 40;
-  if (!last_part) last_part = 20;
-  if (str.length > max_length) {
-    return str.substr(0, first_part) + '...' + str.substr(str.length-last_part, str.length);
+var decodeQueryPath = function(query_path) {
+  var decoded_path = query_path;
+  try {
+    decoded_path = decodeURIComponent(query_path);
+  } catch (e) {
+    if (e instanceof URIError) {
+      decoded_path = query_path;
+    } else {
+      return null;
+    }
   }
-  return str;
-}
-
-var scanDir = function(dir_path, options, callback) {
-  if (typeof options == 'function') {
-    callback = options;
-    options = {};
-  }
-
-  // console.log(chalk.magenta('Directory:'), ellipsisMiddle(dir_path));
-
-  var dirlist = [];
-  var filelist = [];
-
-  fs.readdir(dir_path, function(err, files) {
-    if (err) return callback(err);
-
-    async.eachSeries(files, function(file, cb) {
-      
-      // if (file.indexOf('.') == 0) {
-      //   return cb();
-      // }
-
-      if (file == '.DS_Store') return cb();
-
-      var file_path = path.join(dir_path, file);
-
-      var stats = undefined;
-      try {
-        stats = fs.lstatSync(file_path);
-      } catch(e) {
-        console.log(e);
-        return cb();
-      }
-      if (!stats) return cb();
-      
-      // console.log(stats);
-      if (stats.isFile()) {
-
-        if (options.min_file_size && stats['size'] < min_file_size) return cb();
-
-        var file_type = path.extname(file).replace('.','').toLowerCase();
-        if (options.file_types && options.file_types.indexOf(file_type) == -1) return cb();
-
-        var file_info = {
-          path: file_path,
-          name: file,
-          type: file_type,
-          size: stats['size'],
-          atime: stats['atime'],
-          mtime: stats['mtime'],
-          ctime: stats['ctime']
-        };
-
-        filelist.push(file_info);
-        cb();
-      } else if (stats.isDirectory() && options.recursive) {
-
-        dirlist.push({
-          path: file_path,
-          name: file,
-          atime: stats['atime'],
-          mtime: stats['mtime'],
-          ctime: stats['ctime']
-        });
-
-        scanDir(file_path, options, function(err, files, dirs) {
-          if (err) return cb(err);
-
-          filelist = filelist.concat(files);
-          dirlist = dirlist.concat(dirs);
-
-          cb();
-        });
-      } else {
-        cb();
-      }
-    }, function(err) {
-      callback(err, filelist, dirlist);
-    });
-  });
-}
-
-var getParentDirs = function(_path) {
-  var parents = [];
-  var parent = path.dirname(_path);
-  if (parent && parent != '' && parent != '.') {
-    var _parents = getParentDirs(parent);
-    if (_parents.length) parents = parents.concat(_parents);
-    parents.push(parent);
-  } 
-  // else if (parent == '.') {
-  //   parents.push(parent);
-  // }
-  return parents;
+  return decoded_path;
 }
 
 var sortItems = function(items, field, order) {
@@ -236,29 +153,6 @@ var sortItems = function(items, field, order) {
   }
 }
 
-var checkDirExists = function(dir_path, exists_map) {
-  exists_map = exists_map || {};
-  if (dir_path == '/') return true;
-  if (typeof exists_map[dir_path] != 'undefined') {
-    return exists_map[dir_path];
-  }
-  if (!checkDirExists(path.dirname(dir_path), exists_map)) {
-    exists_map[dir_path] = false;
-    return false;
-  }
-  var exists = utils.directoryExists(dir_path);
-  exists_map[dir_path] = exists;
-  return exists;
-}
-
-var checkFileExists = function(file_path, exists_map) {
-  exists_map = exists_map || {};
-  if (!checkDirExists(path.dirname(file_path), exists_map)) {
-    return false;
-  }
-  return utils.fileExists(file_path);
-}
-
 var startServer = function() {
   var express = require('express');
   var session = require('express-session');
@@ -275,6 +169,14 @@ var startServer = function() {
   }));
   app.use(express.static(path.join(__dirname, 'public')))
 
+  app.get('/info', function(req, res) {
+    return res.json({
+      name: 'File Browser',
+      version: package.version,
+      data_dir: data_dir
+    });
+  });
+
   // GET /
   // GET /?dir=...
   // GET /?images=1
@@ -283,123 +185,65 @@ var startServer = function() {
     var dirs = [];
     var files = [];
 
-    var dir_path = req.query.dir ? decodeURIComponent(req.query.dir) : '.';
+    var dir_path = req.query.dir ? decodeQueryPath(req.query.dir) : filestore.getRootPath();
     var total_size = 0;
 
     // console.log(dir_parents);
     var parents = [];
-    if (dir_path != '.') {
-      var dir_parents = getParentDirs(dir_path);
+    if (!filestore.isRootPath(dir_path)) {
+      var dir_parents = filestore.getParentDirs(dir_path);
       parents = dir_parents.map(function(parent_path) {
-        return {path: parent_path, name: path.basename(parent_path)};
+        return { path: parent_path, name: path.basename(parent_path) };
       });
     }
 
     if (req.query.from_dir) {
-      req.query.from_dir = decodeURIComponent(req.query.from_dir);
+      req.query.from_dir = decodeQueryPath(req.query.from_dir);
     }
 
     // console.log('Path:', dir_path);
     if (req.query.images) {
       if (req.query.from_dir) {
-        var matched_image_files = image_files.filter(function(file_relpath) {
-          return file_relpath.indexOf(req.query.from_dir) == 0;
-        });
-        files = matched_image_files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getImageFilesFromDir(req.query.from_dir);
       } else {
-        files = image_files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getImageFiles();
       }
     } 
     else if (req.query.videos) {
       if (req.query.from_dir) {
-        var matched_video_files = video_files.filter(function(file_relpath) {
-          return file_relpath.indexOf(req.query.from_dir) == 0;
-        });
-        files = matched_video_files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getVideoFilesFromDir(req.query.from_dir);
       } else {
-        files = video_files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getVideoFiles();
       }
     }
     else if (req.query.files) {
       if (req.query.from_dir) {
-        var matched_files = all_files.filter(function(file_relpath) {
-          return file_relpath.indexOf(req.query.from_dir) == 0;
-        });
-        files = matched_files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getFilesFromDir(req.query.from_dir);
       } else {
-        files = all_files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getAllFiles();
       }
     }
     else if (req.query.file_type) {
       if (req.query.from_dir) {
-        var matched_files = file_types_map[req.query.file_type].files.filter(function(file_relpath) {
-          return file_relpath.indexOf(req.query.from_dir) == 0;
-        });
-        files = matched_files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getMatchedFilesFromDir(req.query.from_dir, req.query.file_type);
       } else {
-        files = file_types_map[req.query.file_type].files.map(function(file_relpath) {
-          return files_map[file_relpath];
-        });
+        files = filestore.getMatchedFiles(req.query.file_type);
       }
     }
-    else if (dir_path && dirs_map[dir_path]) {
-      var dir_entry = dirs_map[dir_path];
-      dirs = dir_entry.subdirs.map(function(dir_relpath) {
-        return {
-          name: dirs_map[dir_relpath].name,
-          path: dirs_map[dir_relpath].path,
-          size: dirs_map[dir_relpath].size,
-          atime: dirs_map[dir_relpath].atime,
-          mtime: dirs_map[dir_relpath].mtime,
-          ctime: dirs_map[dir_relpath].ctime,
-          subdirs_count: dirs_map[dir_relpath].subdirs.length,
-          files_count: dirs_map[dir_relpath].files.length
-        }
-      });
-      files = dir_entry.files.map(function(file_relpath) {
-        return files_map[file_relpath];
-      });
+    else if (dir_path) {
+      dirs = filestore.getSubdirs(dir_path);
+      files = filestore.getSubfiles(dir_path);
+    }
+
+    if (req.query.q) {
+      dirs = filestore.searchDirs(req.query.q);
+      files = filestore.searchFiles(req.query.q);
     }
 
     var dir_file_types = [];
-    var dir_file_types_map = {};
-    
     if (req.query.from_dir) {
-      files.forEach(function(file) {
-        if (file.type && file.type != '') {
-          if (!dir_file_types_map[file.type]) {
-            dir_file_types_map[file.type] = {};
-            dir_file_types_map[file.type].count = 0;
-            dir_file_types_map[file.type].files = [];
-          }
-          dir_file_types_map[file.type].count++;
-        }
-      });
-      for(var file_type in dir_file_types_map) {
-        dir_file_types.push({
-          type: file_type, 
-          count: dir_file_types_map[file_type].count
-        });
-      }
-      dir_file_types.sort(function(a,b) {
-        if (a.count>b.count) return -1;
-        if (a.count<b.count) return 1;
-        return 0;
-      });
+      // dir_file_types = filestore.getFileTypes(files);
+      dir_file_types = filestore.getFileTypesFromDir(req.query.from_dir);
     }
 
     dirs.forEach(function(dir){ total_size += dir.size || 0; });
@@ -444,17 +288,19 @@ var startServer = function() {
       }
     }
 
+    if (query.listview) {
+      if (req.session) req.session.listview = query.listview;
+    } else if (req.session) {
+      query.listview = req.session.listview;
+    }
+
     query.limit = query.limit ? parseInt(query.limit) : 100;
     query.skip = query.skip ? parseInt(query.skip) : 0;
     
-    // var start_index = Math.min(query.skip, files.length);
-    // var end_index = Math.min(query.skip + query.limit, files.length);
-    // var files_length = files.length;
-    // files = files.slice(start_index, end_index);
-
     var dirs_length = dirs.length;
     var files_length = files.length;
     var items_length = dirs_length + files_length;
+
     var start_index = Math.min(query.skip, items_length);
     var end_index = Math.min(query.skip + query.limit, items_length);
 
@@ -464,24 +310,25 @@ var startServer = function() {
     } else if (start_index < dirs.length && end_index >= dirs.length) {
       dirs = dirs.slice(start_index); // till end
       files = files.slice(0, end_index-dirs.length);
-    } else { // start_index > dirs.length
-      dirs = [];
+    } else { // start_index >= dirs.length
       files = files.slice(start_index-dirs.length, end_index-dirs.length);
+      dirs = [];
     }
 
-    if (options.check_exists) {
+    // if (options.check_exists) {
       var exists_map = {};
       dirs.forEach(function(dir) {
-        dir.missing = !checkDirExists(path.join(data_dir, dir.path), exists_map);
+        dir.missing = !fileUtils.checkDirExists(path.join(data_dir, dir.path), exists_map);
       });
       files.forEach(function(file) {
-        file.missing = !checkFileExists(path.join(data_dir, file.relpath), exists_map);
+        file.missing = !fileUtils.checkFileExists(path.join(data_dir, file.relpath), exists_map);
       });
-    }
+    // }
 
     res.render('file-browser', {
       config: config,
       query: query,
+      // nav
       parents: parents,
       dir_path: dir_path,
       dir_name: path.basename(dir_path),
@@ -492,14 +339,16 @@ var startServer = function() {
       dirs_length: dirs_length,
       files: files,
       files_length: files_length,
-      files_count: all_files.length,
-      images_count: image_files.length,
-      videos_count: video_files.length,
-      popular_file_types: popular_file_types,
+      // global
+      files_count: filestore.getFilesCount(),
+      images_count: filestore.getImageFilesCount(),
+      videos_count: filestore.getVideoFilesCount(),
+      popular_file_types: filestore.getPopularFileTypes(),
+      // helpers
       path: path,
       bytes: bytes,
       moment: moment,
-      ellipsisMiddle: ellipsisMiddle
+      utils: utils
     });
   });
 
@@ -512,76 +361,28 @@ var startServer = function() {
 
   // GET /open?path=...
   app.get('/open', function(req, res) {
-    var fpath = path.join(data_dir, decodeURIComponent(req.query.path));
+    var fpath = path.join(data_dir, decodeQueryPath(req.query.path));
     open(fpath);
     return res.json({ok: 1});
   });
 
-  var updateParentDirSize = function(frelpath) {
-    var parent_dirs = getParentDirs(frelpath);
-    if (parent_dirs && parent_dirs.length) {
-      var dir_size_map = {};
-      parent_dirs.forEach(function(parent_dir) {
-        if (dirs_map[parent_dir]) {
-          dirs_map[parent_dir].size = getDirSize(parent_dir, dir_size_map);
-        }
-      });
-    }
-  }
-
-  // POST /delete/path=...
+  // POST /delete?path=...
   app.post('/delete', function(req, res) {
-    var frelpath = decodeURIComponent(req.query.path);
+    var frelpath = decodeQueryPath(req.query.path);
     var fpath = path.join(data_dir, frelpath);
 
-    console.log('Delete path:', fpath);
-    if (utils.fileExists(fpath)) {
-      console.log('Delete file:', fpath);
-      fse.remove(fpath, function(err) {
-        if (err) {
-          console.log(err);
-          return res.status(500).send({error: err.message});
-        }
-        // update file map & parent folder sizes
-        if (files_map[frelpath]) {
-          var parent_path = path.dirname(frelpath);
-          if (dirs_map[parent_path]) {
-            dirs_map[parent_path].files = dirs_map[parent_path].files.filter(function(file_relpath) {
-              return file_relpath != frelpath;
-            });
-          }
-          updateParentDirSize(frelpath);
-        }
-        
-        res.json({deleted: 1, type: 'file', abs_path: fpath});
-      });
-    } else if (utils.directoryExists(fpath)) {
-      console.log('Delete folder:', fpath);
-      fse.remove(fpath, function(err) {
-        if (err) {
-          console.log(err);
-          return res.status(500).send({error: err.message});
-        }
-        // update file map & parent folder sizes
-        if (dirs_map[frelpath]) {
-          delete dirs_map[frelpath];
-          var parent_path = path.dirname(frelpath);
-          if (dirs_map[parent_path]) {
-            dirs_map[parent_path].subdirs = dirs_map[parent_path].subdirs.filter(function(file_relpath) {
-              return file_relpath != frelpath;
-            });
-          }
-          updateParentDirSize(frelpath);
-        }
-        res.json({deleted: 1, type: 'folder', abs_path: fpath});
-      });
-    } else {
-      return res.status(400).send({error: 'Path not exist'});
-    }
+    filestore.deletePath(frelpath, data_dir, function(err, result) {
+      if (err) {
+        console.log(err);
+        return res.status(500).send({error: err.message});
+      }
+
+      res.json(result || {deleted: 1, abs_path: fpath});
+    });
   });
 
   var getFile = function(req, res) {
-    var filepath = path.join(data_dir, decodeURIComponent(req.query.path));
+    var filepath = path.join(data_dir, decodeQueryPath(req.query.path));
     return res.sendFile(filepath);
   }
 
@@ -589,50 +390,46 @@ var startServer = function() {
   app.get('/file', getFile);
   app.get('/files/:filename', getFile);
 
-  var stat_map = {};
-
   // GET /video?path=...
   app.get('/video', function(req, res) {
-    var filepath = path.join(data_dir, decodeURIComponent(req.query.path));
-    if (!stat_map[filepath]) {
-      stat_map[filepath] = fs.statSync(filepath);
-    }
-    var stat = stat_map[filepath];
-    var fileSize = stat.size
-    var range = req.headers.range
+    var filepath = path.join(data_dir, decodeQueryPath(req.query.path));
+    var stat = filestore.getFileStats(filepath);
+    var fileSize = stat.size;
+    var range = req.headers.range;
 
     if (range) {
-      var parts = range.replace(/bytes=/, "").split("-")
-      var start = parseInt(parts[0], 10)
+      var parts = range.replace(/bytes=/, "").split("-");
+      var start = parseInt(parts[0], 10);
       var end = parts[1]
         ? parseInt(parts[1], 10)
         : fileSize-1
+        ;
 
-      var chunksize = (end-start)+1
-      var file = fs.createReadStream(filepath, {start, end})
+      var chunksize = (end-start)+1;
+      var file = fs.createReadStream(filepath, {start, end});
       var head = {
         'Content-Range': `bytes ${start}-${end}/${fileSize}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': chunksize,
         'Content-Type': 'video/mp4',
-      }
+      };
 
       if (path.extname(filepath) == '.webm') {
         head['Content-Type'] = 'video/webm';
       }
 
-      res.writeHead(206, head)
-      file.pipe(res)
+      res.writeHead(206, head);
+      file.pipe(res);
     } else {
       var head = {
         'Content-Length': fileSize,
         'Content-Type': 'video/mp4',
-      }
+      };
       if (path.extname(filepath) == '.webm') {
         head['Content-Type'] = 'video/webm';
       }
-      res.writeHead(200, head)
-      fs.createReadStream(filepath).pipe(res)
+      res.writeHead(200, head);
+      fs.createReadStream(filepath).pipe(res);
     }
   });
 
@@ -643,34 +440,68 @@ var startServer = function() {
   // GET /comic?path=...&page=NUM
   app.get('/comic', function(req, res) {
     if (!req.query.path) return res.status(400).send({error: 'Missing file path'});
-    var filepath = path.join(data_dir, decodeURIComponent(req.query.path));
+    var filepath = path.join(data_dir, decodeQueryPath(req.query.path));
     var filepath_hash = utils.md5Hash(filepath);
     
     if (req.query.page) {
       var page_num = parseInt(req.query.page);
       if (isNaN(page_num)) return res.status(400).send({error: 'Invalid page number'});
 
-      var extractPage = function(page_file_name) {
-        comicFile.extractPage(filepath, page_file_name, {
-          targetDir: path.join(cache_dir, filepath_hash[0], filepath_hash[1]+filepath_hash[2], filepath_hash)
-        }, function(err, page_file_path) {
-          if (err) return res.status(500).send({error: 'Extract page failed! ' + err.message});
-          if (!page_file_path) return res.status(500).send({error: 'Cannot extract page!'});
+      var extractPage = function(page_file_name, files) {
+        var target_dir = path.join(cache_dir, filepath_hash[0], 
+          filepath_hash[1]+filepath_hash[2], filepath_hash);
 
-          res.sendFile(page_file_path);
+        if (utils.fileExists(path.join(target_dir, page_file_name))) {
+          return res.sendFile(path.join(target_dir, page_file_name));
+        }
+
+        comic_extract_queue.pushJob({
+          archive_file_path: filepath,
+          page_num: page_num,
+          page_file_name: page_file_name,
+          target_dir: target_dir,
+          files: files,
+          debug: options.debug,
+          verbose: options.verbose
+        }, function(args, done) {
+
+          if (utils.fileExists(path.join(args.target_dir, args.page_file_name))) {
+            res.sendFile(path.join(args.target_dir, args.page_file_name));
+            return done();
+          }
+
+          if (args.verbose) console.log('extractPage:', args.page_num, args.page_file_name);
+
+          comicFile.extractPage(args.archive_file_path, args.page_file_name, {
+            targetDir: args.target_dir,
+            files: args.files,
+            debug: args.debug,
+            verbose: args.verbose
+          }, function(err, page_file_path) {
+            if (err) {
+              res.status(500).send({error: 'Extract page failed! ' + err.message});
+            } else if (!page_file_path) {
+              res.status(500).send({error: 'Cannot extract page!'});
+            } else {
+              res.sendFile(page_file_path);
+            }
+            done();
+          });
+        }, function(err) {
+          // Job done!
         });
       }
 
       if (comic_cache[filepath_hash] && comic_cache[filepath_hash]['pages'] 
         && comic_cache[filepath_hash]['pages'].length>page_num) {
-        return extractPage(comic_cache[filepath_hash]['pages'][page_num]);
+        return extractPage(comic_cache[filepath_hash]['pages'][page_num], comic_cache[filepath_hash]['files']);
       } else {
         comicFile.getInfo(filepath, function(err, result) {
           if (err) return res.status(500).send({error: 'Get file info failed! ' + err.message});
           if (!result) return res.status(500).send({error: 'Cannot get file info!'});
 
           comic_cache[filepath_hash] = result;
-          return extractPage(result['pages'][page_num]);
+          return extractPage(result['pages'][page_num], result['files']);
         });
       }
     } else {
@@ -680,8 +511,6 @@ var startServer = function() {
         if (err) return res.status(500).send({error: 'Get file info failed! ' + err.message});
         if (!result) return res.status(500).send({error: 'Cannot get file info!'});
         
-        // console.log(result);
-
         comic_cache[filepath_hash] = result;
         return res.json(result);
       });
@@ -691,11 +520,14 @@ var startServer = function() {
   // GET /thumb?path=...
   app.get('/thumb', function(req, res) {
     if (!req.query.path) return res.status(400).send({error: 'Missing file path'});
-    var filepath = path.join(data_dir, decodeURIComponent(req.query.path));
+    var filepath = path.join(data_dir, decodeQueryPath(req.query.path));
     var filepath_hash = utils.md5Hash(filepath);
     
+    var thumb_width = 150;
+    var thumb_height = 150;
+
     var thumb_filepath = path.join(thumbs_dir, filepath_hash[0], 
-      filepath_hash[1]+filepath_hash[2], filepath_hash);
+      filepath_hash[1]+filepath_hash[2], filepath_hash + '-' + thumb_width+'x'+thumb_height);
 
     fse.ensureDirSync(path.dirname(thumb_filepath));
 
@@ -704,13 +536,14 @@ var startServer = function() {
     }
 
     var fileext = path.extname(filepath);
-    if (fileext.indexOf('.') == 0) fileext = fileext.replace('.','');
+    if (fileext.indexOf('.') == 0) fileext = fileext.replace('.','').toLowerCase();
 
     if (COMIC_FILE_TYPES.indexOf(fileext) != -1) {
       comicFile.generateCoverImage(filepath, thumb_filepath, {
         tmpdir: path.join(cache_dir, filepath_hash[0], filepath_hash[1]+filepath_hash[2], filepath_hash),
-        cover_width: 60,
-        cover_height: 60
+        cover_width: thumb_width,
+        cover_height: thumb_height,
+        debug: options.debug
       }, function(err, result) {
         if (err) return res.status(500).send({error: 'Generate thumb failed! ' + err.message});
         if (!result || !result.cover_image) return res.status(500).send({error: 'Cannot generate thumb!'});
@@ -719,14 +552,26 @@ var startServer = function() {
       });
     } else if (IMAGE_FILE_TYPES.indexOf(fileext) != -1) {
       photoFile.generateThumbImage(filepath, thumb_filepath, {
-        thumb_width: 60,
-        thumb_height: 60
+        thumb_width: thumb_width,
+        // thumb_height: thumb_height
       }, function(err) {
         if (err) return res.status(500).send({error: 'Generate thumb failed! ' + err.message});
 
         return res.sendFile(thumb_filepath);
       });
-    } else {
+    } else if (PDF_FILE_TYPES.indexOf(fileext) != -1) {
+      // console.log('PDF thumb:', filepath);
+      pdfFile.generateCoverImage(filepath, thumb_filepath, {
+        verbose: false,
+        thumbnail: true,
+        thumb_width: thumb_width,
+        // thumb_height: thumb_height
+      }, function(err) {
+        if (err) return res.status(500).send({error: 'Generate thumb failed! ' + err.message});
+
+        return res.sendFile(thumb_filepath);
+      });
+    }else {
       return res.status(404).send();
     }
   });
@@ -750,219 +595,16 @@ var startServer = function() {
   startListen();
 }
 
-var addDirToMap = function(dir) {
-  var dir_path = dir.path;
-  var dir_relpath = (dir_path == data_dir) ? '.' : path.relative(data_dir, dir_path);
-
-  // console.log(dir_relpath);
-
-  if (!dirs_map[dir_relpath]) {
-    dirs_map[dir_relpath] = {};
-    dirs_map[dir_relpath].name = path.basename(dir_relpath);
-    dirs_map[dir_relpath].path = dir_relpath;
-    dirs_map[dir_relpath].size = 0;
-    dirs_map[dir_relpath].files = [];
-    dirs_map[dir_relpath].subdirs = [];
-  }
-  if (dir.atime) dirs_map[dir_relpath].atime = dir.atime;
-  if (dir.mtime) dirs_map[dir_relpath].mtime = dir.mtime;
-  if (dir.ctime) dirs_map[dir_relpath].ctime = dir.ctime;
-
-  if (dir_path != data_dir) {
-    var parent_dir_entry = addDirToMap({ path: path.dirname(dir_path) });
-    if (parent_dir_entry.subdirs.indexOf(dir_relpath) == -1) {
-      parent_dir_entry.subdirs.push(dir_relpath);
-    }
-  }
-
-  return dirs_map[dir_relpath];
-}
-
-var getDirSize = function(dir_relpath, dir_size_map) {
-  // console.log('getDirSize:', dir_relpath);
-
-  dir_size_map = dir_size_map || {};
-  
-  if (!dir_relpath) return 0;
-  if (!dirs_map[dir_relpath]) return 0;
-  if (dir_size_map[dir_relpath]) return dir_size_map[dir_relpath];
-
-  if (dirs_map[dir_relpath].subdirs.length == 0) {
-    dir_size_map[dir_relpath] = dirs_map[dir_relpath].size;
-    return dirs_map[dir_relpath].size;
-  }
-
-  var dir_size = dirs_map[dir_relpath].size; // size of files (if any)
-  dirs_map[dir_relpath].subdirs.forEach(function(subdir_relpath) {
-    dir_size += getDirSize(subdir_relpath, dir_size_map);
-  });
-
-  dir_size_map[dir_relpath] = dir_size;
-  return dir_size;
-}
-
-var createDirsIndex = function(dirs) {
-  console.log('Dirs:', dirs.length);
-
-  dirs.forEach(function(dir) {
-    addDirToMap(dir);
-  });
-}
-
-var recalculateDirsSize = function() {
-  // calculate directory size
-  for(var dir_relpath in dirs_map) {
-    dirs_map[dir_relpath].size = getDirSize(dir_relpath);
-  }
-}
-
-var createFilesIndex = function(files) {
-
-  console.log('Files:', files.length);
-
-  var total_files_size = 0;
-  files.forEach(function(file) { 
-    total_files_size += file.size;
-  });
-  console.log('Size:', bytes(total_files_size));
-
-  files.forEach(function(file) {
-
-    file.relpath = path.relative(data_dir, file.path);
-    file.type = (file.type) ? file.type.toLowerCase() : '';
-
-    files_map[file.relpath] = file;
-
-    if (IMAGE_FILE_TYPES.indexOf(file.type) != -1) {
-      file.is_image = true;
-      image_files.push(file.relpath);
-    } else if (VIDEO_FILE_TYPES.indexOf(file.type) != -1) {
-      file.is_video = true;
-      video_files.push(file.relpath);
-    } else if (COMIC_FILE_TYPES.indexOf(file.type) != -1) {
-      file.is_comic = true;
-    }
-    all_files.push(file.relpath);
-
-    if (file.type && file.type != '') {
-      if (!file_types_map[file.type]) {
-        file_types_map[file.type] = {};
-        file_types_map[file.type].count = 0;
-        file_types_map[file.type].files = [];
-      }
-      file_types_map[file.type].count++;
-      file_types_map[file.type].files.push(file.relpath);
-    }
-    
-    var parent_dir_entry = addDirToMap({ path: path.dirname(file.path) });
-    if (parent_dir_entry.files.indexOf(file.relpath) == -1) {
-      parent_dir_entry.size += file.size;
-      parent_dir_entry.files.push(file.relpath);
-    }
-
-    // console.log('File:', file.relpath);
-    // console.log('Dir:', dir_relpath);
-  });
-
-  // get popular file types
-  var file_types = [];
-  for(var file_type in file_types_map) {
-    file_types.push({type: file_type, count: file_types_map[file_type].count});
-  }
-  file_types.sort(function(a,b) {
-    if (a.count>b.count) return -1;
-    if (a.count<b.count) return 1;
-    return 0;
-  });
-  if (file_types.length > 10) popular_file_types = file_types.slice(0, 10);
-  else popular_file_types = file_types.slice(0);
-}
-
 var loadIndex = function(callback) {
-
-  // var supported_file_types = ['mp4','mkv','avi','wmv','png','gif','jpg','jpeg','txt'];
-
   if (options.index_file) {
-    if (!utils.fileExists(options.index_file)) {
-      console.log('File not found:', options.index_file);
-      return callback(new Error('File not found: ' + options.index_file));
-    }
-
-    var tmp_files_map = utils.loadFromJsonFile(options.index_file);
-    var tmp_dirs_map = {};
-    var dirs = [];
-    var files = [];
-
-    for (var file_relpath in tmp_files_map) {
-      // console.log('File:', file_relpath);
-
-      var file_info = tmp_files_map[file_relpath];
-
-      file_info.path = path.join(data_dir, file_relpath);
-
-      file_info.name = file_info.filename || file_info.name || path.basename(file_relpath);
-      file_info.size = file_info.filesize || file_info.size || 0;
-      file_info.type = file_info.filetype || file_info.type || '';
-
-      files.push(file_info);
-
-      var dir_path = path.dirname(file_info.path);
-      if (!tmp_dirs_map[dir_path]) {
-        // console.log('Dir:', dir_path);
-        tmp_dirs_map[dir_path] = {
-          path: dir_path
-        }
-        dirs.push(tmp_dirs_map[dir_path]);
-      }
-    }
-
-    // files = files.filter(function(file) { 
-    //   return supported_file_types.indexOf(file.type) != -1;
-    // });
-
-    createDirsIndex(dirs);
-    createFilesIndex(files);
-    recalculateDirsSize();
-
-    return callback();
+    filestore.importFromIndexFile(options.index_file, data_dir, callback);
   } else {
-    var scan_opts = {recursive: true};
-    // scan_opts.file_types = supported_file_types;
-
-    console.log('Scanning input dir...');
-    scanDir(data_dir, scan_opts, function(err, files, dirs) {
-      if (err) {
-        console.log('Scan dir error!', data_dir);
-        console.log(err);
-        return callback(err);
-      }
-      
-      // files = files.filter(function(file) { 
-      //   return supported_file_types.indexOf(file.type) != -1;
-      // });
-
-      createDirsIndex(dirs);
-      createFilesIndex(files);
-      recalculateDirsSize();
-
-      return callback();
-    });
+    filestore.importFromDirectory(data_dir, data_dir, callback);
   }
 }
 
 var reloadIndex = function(callback) {
-  all_dirs = [];
-
-  dirs_map = {};
-  files_map = {};
-
-  file_types_map = {};
-  popular_file_types = [];
-
-  image_files = [];
-  video_files = [];
-  all_files = [];
-
+  filestore.resetIndex();
   loadIndex(callback);
 }
 
